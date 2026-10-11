@@ -1,0 +1,49 @@
+Ab tak ka summary
+1. Dataset
+Kaggle ka Indian Railways Delay Dataset hai, 4 files ka: delay, schedule, train details aur station names.
+Delay file me 38,428,703 rows hain, 8 Feb 2025 se 7 Feb 2026 tak (poora ek saal), poore India ke trains ka.
+2. Cleaning (DuckDB se, kyunki data bada tha)
+Kaam	Result
+NULL delay hataya	1,874,271 rows hati (4.9%)
+Duplicates check	0 mile
+Extreme delay hataya (-60 se 1440 min ke bahar)	19,072 rows hati (0.05%). Ek row 525,592 min (lagbhag 1 saal) ki thi, jo galat thi
+Final clean data	36,535,360 rows
+Mahine-wise check me Dec/Jan me median delay 20 min mili, jabki garmi aur barsaat me 14 se 15 min thi. Matlab fog ka asar dikhta hai aur data asli lagta hai.
+train_no ko 5-digit text banaya (jaise '00961'), taaki files sahi jud sakein.
+3. Scope: sirf Northern Railway (NR)
+Zone-wise ginti me NR sabse bada nikla (sabse zyada rows, trains aur stations).
+Wo trains chuni jinke 70% ya zyada stops NR me hain. Ye 895 trains thi, jinme se 684 ka delay data mila.
+Isse 3,452,134 rows bani, jo delay_nr.parquet me save hain aur pandas me aaram se chalti hain.
+Baad me baaki zones ke liye wahi pipeline dobara chalayenge.
+4. Schedule jodna (ek galti sudhari)
+Shuru me maine station_no ko station code samjha, jo galat tha. Wo route me stop ka sequence number hai.
+Fir maine station_no hata kar merge kiya, wo bhi galat nikla, kyunki kuch special trains ka route dono files me alag hai. Isse galat distance mil raha tha.
+Final tarika: train_no + station_no + station_name teeno par merge. Isse sirf wahi rows judti hain jinka route sach me match karta hai. Bachi hui 12.13% rows me distance_from_origin khali hai, jo galat value se behtar hai.
+5. Features jo ab tak bane
+Feature	Matlab
+prev_delay	Pichle station ka delay (correlation 0.947, sabse strong)
+avg_last7	Train ke pichle 7 runs ka average delay (correlation 0.486)
+dayofweek, month, is_fog_season	Din, mahina, Dec/Jan ka flag
+sched_hour	Scheduled ghanta
+stop_idx, route_stops, stops_left, route_progress	Route me train kahan hai
+
+Abhi df me 3,452,134 rows aur 20 columns hain.
+
+Abhi pending
+
+Step 20 ka code diya hai, par tumne abhi chalaya nahi hai. Usme data ko time se split karte hain (1 Jan 2026 se pehle train, uske baad test) aur do baseline MAE nikalte hain.
+
+Aage ka plan
+Step 20 chalao aur output paste karo.
+LightGBM se do models banao: ek live model (prev_delay ke saath) aur ek pre-departure model (bina prev_delay ke).
+SHAP se dekho ki model kis feature par kitna depend karta hai.
+Weather (Open-Meteo) aur holidays jodo.
+Baaki zones (ER, SR, WR, etc.) ke liye pipeline dobara chalao.
+Streamlit app aur GitHub README banao.
+
+Ab Step 20 ka code chalao aur output paste kar do, phir model train karenge.
+
+
+
+
+Claude is AI and can make mistakes. Please double-ch
