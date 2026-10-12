@@ -1,5 +1,5 @@
 """
-Train Delay Predictor - multi-page Streamlit app (v2)
+Uttar Rail Pulse - Northern Railway train delay predictor (multi-page Streamlit app)
 
 Run:
     pip install -r requirements.txt
@@ -28,7 +28,11 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="Train Delay Predictor", page_icon="🚆", layout="wide")
+APP_NAME = "Uttar Rail Pulse"
+APP_TAGLINE = "Delay predictions for Northern Railway (NR) trains"
+AUTHOR = "Shreshtha Pandey"
+
+st.set_page_config(page_title=f"{APP_NAME} | Northern Railway delays", page_icon="🚆", layout="wide")
 
 NAVY, AMBER, GREEN, RED, STEEL = "#14325C", "#F2A900", "#2E8B57", "#C8372D", "#E9EEF3"
 
@@ -38,10 +42,10 @@ st.markdown(
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&display=swap');
 html, body, [class*="css"] {{ font-family: 'Barlow', sans-serif; }}
 h1, h2, h3, h4 {{ font-family: 'Barlow Condensed', sans-serif !important; }}
-.block-container {{ padding-top: 1.4rem; max-width: 1200px; }}
-.hero-title {{ font-family:'Barlow Condensed'; font-size:42px; font-weight:700; color:{NAVY}; margin:0; line-height:1.1; }}
-.hero-sub {{ color:#4a5a70; margin:4px 0 20px 0; font-size:16px; }}
-.step {{ font-family:'Barlow Condensed'; font-size:23px; font-weight:600; color:{NAVY};
+.block-container {{ padding-top: 4.2rem; max-width: 1200px; }}
+.hero-title {{ font-family:'Barlow Condensed'; font-size:46px; font-weight:700; color:inherit; margin:0; line-height:1.1; }}
+.hero-sub {{ color:inherit; opacity:.75; margin:4px 0 20px 0; font-size:16px; }}
+.step {{ font-family:'Barlow Condensed'; font-size:24px; font-weight:700; color:inherit;
         border-bottom:2px solid {STEEL}; padding-bottom:4px; margin:6px 0 12px 0; }}
 .board {{ background:{NAVY}; color:#fff; border-radius:6px; padding:20px 24px; border-bottom:6px solid {AMBER}; }}
 .board .big {{ font-family:'Barlow Condensed'; font-weight:700; font-size:78px; line-height:1; color:{AMBER}; }}
@@ -49,8 +53,13 @@ h1, h2, h3, h4 {{ font-family: 'Barlow Condensed', sans-serif !important; }}
 .board .status {{ font-family:'Barlow Condensed'; font-size:30px; font-weight:600; margin-top:6px; }}
 .board .line {{ color:#cfd9e8; font-size:15px; margin-top:3px; }}
 .dot {{ display:inline-block; width:12px; height:12px; border-radius:50%; margin-right:8px; }}
-.note {{ background:{STEEL}; border-left:4px solid {NAVY}; padding:10px 14px; border-radius:4px; font-size:14px; }}
-div[data-testid="stMetricValue"] {{ font-family:'Barlow Condensed'; font-weight:700; color:{NAVY}; }}
+.note {{ background:{STEEL}; color:#14325C; border-left:4px solid {NAVY}; padding:10px 14px; border-radius:4px; font-size:14px; }}
+.brand {{ background:{NAVY}; border-bottom:6px solid {AMBER}; border-radius:6px; padding:16px 24px;
+          display:flex; align-items:baseline; gap:18px; flex-wrap:wrap; margin-bottom:22px; }}
+.brand .name {{ font-family:'Barlow Condensed'; font-size:48px; font-weight:700; color:#FFFFFF; line-height:1; letter-spacing:.01em; }}
+.brand .tag {{ color:{AMBER}; font-size:17px; font-weight:600; }}
+.footer {{ margin-top:48px; padding:14px 0; border-top:1px solid #d5dde6; text-align:center; color:inherit; opacity:.8; font-size:14px; }}
+div[data-testid="stMetricValue"] {{ font-family:'Barlow Condensed'; font-weight:700; color:inherit; }}
 </style>
 """,
     unsafe_allow_html=True,
@@ -113,7 +122,7 @@ def load_artifacts():
 try:
     MODEL, FEATURES, CAT_COLS, LEVELS, IMPORTANCE = load_artifacts()
 except Exception as e:
-    hero("Train Delay Predictor", "")
+    hero(APP_NAME, "")
     st.error(
         f"Could not load the model from the `{MODEL_DIR}/` folder. Put `train_delay_model.pkl`, "
         f"`feature_columns.pkl` and `categorical_columns.pkl` there and restart.\n\nDetails: {e}"
@@ -365,7 +374,7 @@ def sched_datetime(date, sched_time, day):
 # PAGE 1 - Predict
 # ==========================================================================
 def page_predict():
-    hero("Predict a delay", "Pick a train and a stop. Say whether it is already running. The rest is automatic.")
+    hero("Predict a delay", "Pick a Northern Railway train and a stop. Say whether it is already running. The rest is automatic.")
     prev_trip = st.session_state.get("trip", {})
     left, right = st.columns([1.05, 1], gap="large")
 
@@ -671,6 +680,121 @@ def page_insights():
         st.write(FEATURES)
 
 
+
+# ==========================================================================
+# PAGE 6 - About the project
+# ==========================================================================
+def page_about():
+    hero("About this project", f"{APP_NAME} predicts how late Northern Railway trains will run, stop by stop.")
+
+    st.markdown("### What it does")
+    st.write(
+        "Indian trains often run late, and a delay at one station usually carries on to the next. "
+        "This project learns from millions of past station records of Northern Railway (NR) trains "
+        "and predicts the delay in minutes at any stop on a train's route. It works in two ways: "
+        "before the train starts, using schedule and history only, and while it is running, "
+        "using the delays already seen at earlier stops."
+    )
+
+    st.markdown("### Scope")
+    st.markdown(
+        """
+- **Zone:** Northern Railway (NR) only. Trains were kept when at least 70% of their stops lie in the NR zone.
+- **Period:** daily runs from February 2025 to early February 2026.
+- **Target:** delay at each station, in minutes (negative means early).
+- **Not covered:** trains of other zones, and stations or trains the model never saw in training.
+"""
+    )
+
+    st.markdown("### How it was built")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.markdown("**1. Collect**\n\nStation-level delay records, train schedules, train details and station names.")
+    c2.markdown("**2. Clean**\n\nRemoved missing delays and extreme values (kept -60 to 1440 min), "
+                "stored as Parquet for fast reading, and matched train numbers to a 5-digit format.")
+    c3.markdown("**3. Engineer**\n\nBuilt features for route position, season, weekday, recent delays and "
+                "delays at earlier stops of the same run.")
+    c4.markdown("**4. Model**\n\nTrained LightGBM on past dates and tested it on later, unseen dates.")
+
+    st.markdown("### Data cleaning and checks")
+    st.markdown(
+        """
+- Rows with no delay value (about 4.9%) were removed because the model needs a real answer to learn from.
+- Delays below -60 minutes or above 24 hours were treated as data errors and dropped.
+- Duplicate station records were checked for and none were found.
+- Train and station averages were rebuilt using only earlier dates, so the model never sees the future.
+- The split is by time, not random: training up to 31 Dec 2025, validation 1 to 15 Jan 2026, and testing 16 Jan to 7 Feb 2026.
+"""
+    )
+
+    st.markdown("### Features the model uses")
+    f1, f2 = st.columns(2)
+    with f1:
+        st.markdown(
+            """
+**Live features (while the train is running)**
+- Delay at the previous stop
+- Delay two stops back and the change between them
+- Delay at the starting station
+- Highest and average delay so far on this run
+"""
+        )
+    with f2:
+        st.markdown(
+            """
+**Schedule and history features**
+- Train number, name and type; station
+- Distance from origin, stop position, stops remaining, route progress
+- Scheduled hour, weekday, month, fog season (Dec-Jan)
+- Train's average delay over its last 7 runs
+"""
+        )
+
+    st.markdown("### Weather experiment")
+    st.write(
+        "Morning humidity, wind, temperature and rain from Open-Meteo were tested to capture fog. "
+        "They did not give a reliable improvement on the validation period, so the final model does not use them."
+    )
+
+    st.markdown("### Model")
+    st.write(
+        "LightGBM gradient boosting regressor with early stopping on the validation set. "
+        "Exact scores (MAE, RMSE, R-squared) are in the training notebook, and the Batch page "
+        "can recompute them on any file that has actual delays."
+    )
+
+    st.markdown("### Pages in this app")
+    st.markdown(
+        """
+- **Predict a delay:** pick a train and a stop and get the expected delay and arrival time.
+- **Journey forecast:** enter the delays seen so far and forecast the rest of the route.
+- **What if...:** change the last-stop delay, weekday or season and see the effect.
+- **Batch predictions:** upload a CSV to predict many rows and check accuracy.
+- **How the model thinks:** which features matter most.
+"""
+    )
+
+    st.markdown("### Limitations")
+    st.markdown(
+        """
+- Predictions are statistical estimates, not official railway information. Do not rely on them for safety or ticketing decisions.
+- Before a train starts, predictions are rougher because no live delay is known.
+- Very long delays (6+ hours) are rare in the data, so the model tends to under-predict them.
+- The model reflects 2025 to early 2026 patterns and should be retrained as new data arrives.
+"""
+    )
+
+    st.markdown("### Built with")
+    st.write("Python, pandas, DuckDB, LightGBM, scikit-learn, SHAP, Plotly and Streamlit.")
+    st.caption(f"Designed and built by {AUTHOR}.")
+
+
+def render_footer():
+    st.markdown(
+        f'<div class="footer">{APP_NAME} &nbsp;|&nbsp; Northern Railway delay predictor &nbsp;|&nbsp; '
+        f'Made by <b>{AUTHOR}</b> &nbsp;|&nbsp; Estimates only, not official railway data</div>',
+        unsafe_allow_html=True,
+    )
+
 # --------------------------------------------------------------------------
 # Navigation
 # --------------------------------------------------------------------------
@@ -679,5 +803,11 @@ PG_JOURNEY = st.Page(page_journey, title="Journey forecast", icon="🗺️")
 PG_WHATIF = st.Page(page_whatif, title="What if...", icon="🔀")
 PG_BATCH = st.Page(page_batch, title="Batch predictions", icon="📄")
 PG_INSIGHTS = st.Page(page_insights, title="How the model thinks", icon="🧠")
+PG_ABOUT = st.Page(page_about, title="About the project", icon="ℹ️")
 
-st.navigation([PG_PREDICT, PG_JOURNEY, PG_WHATIF, PG_BATCH, PG_INSIGHTS]).run()
+st.markdown(
+    f'<div class="brand"><span class="name">🚆 {APP_NAME}</span><span class="tag">{APP_TAGLINE}</span></div>',
+    unsafe_allow_html=True,
+)
+st.navigation([PG_PREDICT, PG_JOURNEY, PG_WHATIF, PG_BATCH, PG_INSIGHTS, PG_ABOUT]).run()
+render_footer()
