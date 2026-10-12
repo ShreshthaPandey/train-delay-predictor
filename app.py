@@ -1,21 +1,25 @@
 """
-Indian Railways - Train Delay Predictor (Streamlit UI)
+Train Delay Predictor - multi-page Streamlit app (v2)
 
 Run:
     pip install -r requirements.txt
-    streamlit run app.py
+    streamlit run app_v2.py
 
-Expected files (created by your notebook):
+Needs (from your notebook):
     model/train_delay_model.pkl
     model/feature_columns.pkl
     model/categorical_columns.pkl
-Optional (auto-fills train name / type):
-    railway_data/train_details.csv
+
+Strongly recommended (makes inputs much simpler and predictions more accurate):
+    railway_data/combined_schedule.csv   -> route, distance, scheduled time filled automatically
+    railway_data/train_details.csv       -> train name and type filled automatically
+You can also upload both from the sidebar.
 """
 
 import datetime as dt
 import io
 import os
+import re
 
 import joblib
 import numpy as np
@@ -24,54 +28,44 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# --------------------------------------------------------------------------
-# Page + theme
-# --------------------------------------------------------------------------
 st.set_page_config(page_title="Train Delay Predictor", page_icon="🚆", layout="wide")
 
-NAVY = "#14325C"
-SIGNAL_AMBER = "#F2A900"
-SIGNAL_GREEN = "#2E8B57"
-SIGNAL_RED = "#C8372D"
-STEEL = "#E9EEF3"
+NAVY, AMBER, GREEN, RED, STEEL = "#14325C", "#F2A900", "#2E8B57", "#C8372D", "#E9EEF3"
 
 st.markdown(
     f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&display=swap');
-html, body, [class*="css"], .stMarkdown, .stTextInput, .stSelectbox {{ font-family: 'Barlow', sans-serif; }}
-h1, h2, h3, .board-title {{ font-family: 'Barlow Condensed', sans-serif !important; letter-spacing: .01em; }}
-.block-container {{ padding-top: 1.6rem; max-width: 1250px; }}
-
-.board {{
-  background: {NAVY}; color: #fff; border-radius: 6px; padding: 20px 26px;
-  display: flex; gap: 28px; align-items: center; flex-wrap: wrap;
-  border-bottom: 6px solid {SIGNAL_AMBER};
-}}
-.board .big {{
-  font-family: 'Barlow Condensed', sans-serif; font-weight: 700; font-size: 76px; line-height: 1;
-  color: {SIGNAL_AMBER}; min-width: 190px;
-}}
-.board .big small {{ font-size: 26px; color: #cfd9e8; margin-left: 6px; font-weight: 500; }}
-.board .meta {{ flex: 1; min-width: 220px; }}
-.board .meta .status {{ font-family: 'Barlow Condensed'; font-size: 30px; font-weight: 600; }}
-.board .meta .line {{ color: #cfd9e8; font-size: 15px; margin-top: 4px; }}
+html, body, [class*="css"] {{ font-family: 'Barlow', sans-serif; }}
+h1, h2, h3, h4 {{ font-family: 'Barlow Condensed', sans-serif !important; }}
+.block-container {{ padding-top: 1.4rem; max-width: 1200px; }}
+.hero-title {{ font-family:'Barlow Condensed'; font-size:42px; font-weight:700; color:{NAVY}; margin:0; line-height:1.1; }}
+.hero-sub {{ color:#4a5a70; margin:4px 0 20px 0; font-size:16px; }}
+.step {{ font-family:'Barlow Condensed'; font-size:23px; font-weight:600; color:{NAVY};
+        border-bottom:2px solid {STEEL}; padding-bottom:4px; margin:6px 0 12px 0; }}
+.board {{ background:{NAVY}; color:#fff; border-radius:6px; padding:20px 24px; border-bottom:6px solid {AMBER}; }}
+.board .big {{ font-family:'Barlow Condensed'; font-weight:700; font-size:78px; line-height:1; color:{AMBER}; }}
+.board .big small {{ font-size:26px; color:#cfd9e8; margin-left:6px; font-weight:500; }}
+.board .status {{ font-family:'Barlow Condensed'; font-size:30px; font-weight:600; margin-top:6px; }}
+.board .line {{ color:#cfd9e8; font-size:15px; margin-top:3px; }}
 .dot {{ display:inline-block; width:12px; height:12px; border-radius:50%; margin-right:8px; }}
-
-.hero-title {{ font-family:'Barlow Condensed'; font-size: 44px; font-weight:700; color:{NAVY}; margin:0; }}
-.hero-sub {{ color:#4a5a70; margin:2px 0 18px 0; font-size:16px; }}
 .note {{ background:{STEEL}; border-left:4px solid {NAVY}; padding:10px 14px; border-radius:4px; font-size:14px; }}
 div[data-testid="stMetricValue"] {{ font-family:'Barlow Condensed'; font-weight:700; color:{NAVY}; }}
-button[data-baseweb="tab"] {{ font-family:'Barlow Condensed'; font-size:19px; font-weight:600; }}
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 
-# --------------------------------------------------------------------------
-# Small compatibility helpers (Streamlit changed width args across versions)
-# --------------------------------------------------------------------------
+def hero(title, sub):
+    st.markdown(f'<p class="hero-title">{title}</p><p class="hero-sub">{sub}</p>', unsafe_allow_html=True)
+
+
+def step(text):
+    st.markdown(f'<div class="step">{text}</div>', unsafe_allow_html=True)
+
+
+# ---- Streamlit-version-safe wrappers --------------------------------------
 def show_plot(fig):
     try:
         st.plotly_chart(fig, width="stretch")
@@ -86,15 +80,8 @@ def show_df(df, **kw):
         st.dataframe(df, use_container_width=True, **kw)
 
 
-def show_editor(df, **kw):
-    try:
-        return st.data_editor(df, width="stretch", **kw)
-    except TypeError:
-        return st.data_editor(df, use_container_width=True, **kw)
-
-
 # --------------------------------------------------------------------------
-# Load model artifacts
+# Model
 # --------------------------------------------------------------------------
 MODEL_DIR = os.environ.get("MODEL_DIR", "model")
 
@@ -102,9 +89,8 @@ MODEL_DIR = os.environ.get("MODEL_DIR", "model")
 @st.cache_resource(show_spinner="Loading model...")
 def load_artifacts():
     model = joblib.load(os.path.join(MODEL_DIR, "train_delay_model.pkl"))
-    features = joblib.load(os.path.join(MODEL_DIR, "feature_columns.pkl"))
-    cat_cols = joblib.load(os.path.join(MODEL_DIR, "categorical_columns.pkl"))
-
+    features = list(joblib.load(os.path.join(MODEL_DIR, "feature_columns.pkl")))
+    cat_cols = list(joblib.load(os.path.join(MODEL_DIR, "categorical_columns.pkl")))
     cat_in_order = [c for c in features if c in cat_cols]
     levels = {}
     try:
@@ -113,60 +99,112 @@ def load_artifacts():
             levels = {c: [str(x) for x in lv] for c, lv in zip(cat_in_order, pc)}
     except Exception:
         pass
-
-    gain = None
+    imp = None
     try:
-        gain = pd.DataFrame(
-            {
-                "feature": model.booster_.feature_name(),
-                "gain": model.booster_.feature_importance("gain"),
-                "splits": model.booster_.feature_importance("split"),
-            }
-        ).sort_values("gain", ascending=False)
+        imp = pd.DataFrame({
+            "feature": model.booster_.feature_name(),
+            "gain": model.booster_.feature_importance("gain"),
+        }).sort_values("gain", ascending=False)
     except Exception:
         pass
-    return model, list(features), list(cat_cols), levels, gain
+    return model, features, cat_cols, levels, imp
 
 
 try:
     MODEL, FEATURES, CAT_COLS, LEVELS, IMPORTANCE = load_artifacts()
 except Exception as e:
-    st.markdown('<p class="hero-title">Train Delay Predictor</p>', unsafe_allow_html=True)
+    hero("Train Delay Predictor", "")
     st.error(
-        f"Could not load the model from the `{MODEL_DIR}/` folder.\n\n"
-        "Make sure these three files exist next to app.py:\n"
-        "`model/train_delay_model.pkl`, `model/feature_columns.pkl`, `model/categorical_columns.pkl`.\n\n"
-        f"Details: {e}"
+        f"Could not load the model from the `{MODEL_DIR}/` folder. Put `train_delay_model.pkl`, "
+        f"`feature_columns.pkl` and `categorical_columns.pkl` there and restart.\n\nDetails: {e}"
     )
     st.stop()
 
 
 # --------------------------------------------------------------------------
-# Optional reference data (train name / type lookup)
+# Optional data: schedule + train details
 # --------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def read_reference(raw: bytes):
-    d = pd.read_csv(io.BytesIO(raw), dtype={"train_no": str})
-    d["train_no"] = d["train_no"].str.zfill(5)
+def _clean_ref(d):
+    d["train_no"] = d["train_no"].astype(str).str.zfill(5)
     keep = [c for c in ["train_no", "train_name", "type_code"] if c in d.columns]
     return d[keep].drop_duplicates("train_no")
 
 
-def find_reference(uploaded):
-    if uploaded is not None:
-        return read_reference(uploaded.getvalue())
-    for p in ["railway_data/train_details.csv", "train_details.csv"]:
+def _clean_sched(d):
+    need = {"train_no", "station_no", "station_name"}
+    if not need.issubset(d.columns):
+        return None
+    d["train_no"] = d["train_no"].astype(str).str.zfill(5)
+    d["station_no"] = pd.to_numeric(d["station_no"], errors="coerce")
+    for c in ["distance_from_origin", "arrival_day"]:
+        d[c] = pd.to_numeric(d[c], errors="coerce") if c in d.columns else np.nan
+    if "arrival_time" not in d.columns:
+        d["arrival_time"] = None
+    d = d.drop_duplicates(["train_no", "station_name"])
+    return d[["train_no", "station_no", "station_name", "distance_from_origin", "arrival_day", "arrival_time"]]
+
+
+@st.cache_data(show_spinner=False)
+def ref_from_bytes(raw: bytes):
+    return _clean_ref(pd.read_csv(io.BytesIO(raw), dtype={"train_no": str}))
+
+
+@st.cache_data(show_spinner=False)
+def ref_from_path(path: str, mtime: float):
+    return _clean_ref(pd.read_csv(path, dtype={"train_no": str}))
+
+
+@st.cache_data(show_spinner="Reading schedule...")
+def sched_from_bytes(raw: bytes):
+    return _clean_sched(pd.read_csv(io.BytesIO(raw), dtype={"train_no": str}))
+
+
+@st.cache_data(show_spinner="Reading schedule...")
+def sched_from_path(path: str, mtime: float):
+    return _clean_sched(pd.read_csv(path, dtype={"train_no": str}))
+
+
+def find_file(names):
+    for p in names:
         if os.path.exists(p):
-            with open(p, "rb") as f:
-                return read_reference(f.read())
+            return p
     return None
 
 
+with st.sidebar:
+    st.markdown("### Data files")
+    st.caption("Optional, but they remove most of the typing.")
+    up_sched = st.file_uploader("combined_schedule.csv", type="csv")
+    up_ref = st.file_uploader("train_details.csv", type="csv")
+
+if up_ref is not None:
+    REF = ref_from_bytes(up_ref.getvalue())
+else:
+    _p = find_file(["railway_data/train_details.csv", "train_details.csv"])
+    REF = ref_from_path(_p, os.path.getmtime(_p)) if _p else None
+
+if up_sched is not None:
+    SCHED = sched_from_bytes(up_sched.getvalue())
+else:
+    _p = find_file(["railway_data/combined_schedule.csv", "combined_schedule.csv"])
+    SCHED = sched_from_path(_p, os.path.getmtime(_p)) if _p else None
+
+REF_MAP = {}
+if REF is not None:
+    for r in REF.itertuples(index=False):
+        REF_MAP[r.train_no] = (getattr(r, "train_name", None), getattr(r, "type_code", None))
+
+with st.sidebar:
+    st.success("Schedule loaded: route details are automatic") if SCHED is not None else st.warning(
+        "No schedule file: you will enter route details by hand")
+    st.success("Train names loaded") if REF is not None else st.warning(
+        "No train_details.csv: accuracy may drop (name and type unknown)")
+
+
 # --------------------------------------------------------------------------
-# Prediction helpers
+# Core helpers
 # --------------------------------------------------------------------------
 def to_frame(rows):
-    """Turn a list of feature dicts into a model-ready DataFrame."""
     df = pd.DataFrame(rows)
     for c in FEATURES:
         if c not in df.columns:
@@ -176,10 +214,7 @@ def to_frame(rows):
         if c in CAT_COLS:
             vals = df[c].astype(object).where(df[c].notna(), None)
             vals = vals.map(lambda v: None if v is None else str(v))
-            if c in LEVELS:
-                df[c] = pd.Categorical(vals, categories=LEVELS[c])
-            else:
-                df[c] = pd.Categorical(vals)
+            df[c] = pd.Categorical(vals, categories=LEVELS[c]) if c in LEVELS else pd.Categorical(vals)
         else:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
@@ -190,457 +225,454 @@ def predict_rows(rows):
 
 
 def build_row(ctx, hist):
-    """
-    Build the model input for one stop.
-    ctx  : fixed info about the train/stop (see callers)
-    hist : delays (minutes) already known at earlier stops of this run, in order
-    """
-    i = ctx["stop_index"]
-    total = ctx["total_stops"]
+    """Model input for one stop. hist = known delays at earlier stops, in order."""
+    i, total = ctx["stop_index"], ctx["total_stops"]
     prev = hist[-1] if len(hist) >= 1 else np.nan
     prev2 = hist[-2] if len(hist) >= 2 else np.nan
-    row = {
-        "train_number": ctx["train_number"],
-        "train_name": ctx.get("train_name"),
-        "train_type": ctx.get("train_type"),
-        "station_code": ctx["station_code"],
-        "stop_sequence_no": i + 1,
-        "stop_index": i,
-        "total_stops_in_route": total,
-        "stops_remaining": total - i - 1,
-        "route_progress_ratio": i / max(total - 1, 1),
-        "distance_from_origin_km": ctx["distance_km"],
-        "scheduled_arrival_hour": ctx["sched_hour"],
+    return {
+        "train_number": ctx["train_number"], "train_name": ctx.get("train_name"),
+        "train_type": ctx.get("train_type"), "station_code": ctx.get("station_code"),
+        "stop_sequence_no": i + 1, "stop_index": i, "total_stops_in_route": total,
+        "stops_remaining": total - i - 1, "route_progress_ratio": i / max(total - 1, 1),
+        "distance_from_origin_km": ctx["distance_km"], "scheduled_arrival_hour": ctx["sched_hour"],
         "journey_day_of_arrival": ctx.get("journey_day", 1),
-        "day_of_week": ctx["date"].weekday(),
-        "month": ctx["date"].month,
-        "is_fog_season": int(ctx["fog"]),
-        "has_schedule_match": 1,
+        "day_of_week": ctx["date"].weekday(), "month": ctx["date"].month,
+        "is_fog_season": int(ctx["date"].month in (12, 1)), "has_schedule_match": 1,
         "avg_delay_last_7_runs_min": ctx["avg7"],
-        "previous_station_delay_min": prev,
-        "delay_2_stops_back_min": prev2,
+        "previous_station_delay_min": prev, "delay_2_stops_back_min": prev2,
         "delay_change_last_stop_min": prev - prev2 if len(hist) >= 2 else np.nan,
-        "origin_delay_min": hist[0] if (i > 0 and len(hist) >= 1) else np.nan,
-        "max_delay_so_far_min": max(hist) if (i > 0 and len(hist) >= 1) else np.nan,
-        "avg_delay_so_far_min": (sum(hist) / i) if (i > 0 and len(hist) >= 1) else np.nan,
+        "origin_delay_min": hist[0] if (i > 0 and hist) else np.nan,
+        "max_delay_so_far_min": max(hist) if (i > 0 and hist) else np.nan,
+        "avg_delay_so_far_min": (sum(hist) / i) if (i > 0 and hist) else np.nan,
     }
+
+
+def live_row(ctx, prev=None, prev2=None, origin=None):
+    """Row when the user only knows a few live delays (prev required)."""
+    row = build_row(ctx, [])
+    i = ctx["stop_index"]
+    if i == 0 or prev is None:
+        return row
+    if i == 1:
+        origin, prev2 = prev, None
+    known = [float(x) for x in (origin, prev2, prev) if x is not None]
+    row["previous_station_delay_min"] = float(prev)
+    if prev2 is not None:
+        row["delay_2_stops_back_min"] = float(prev2)
+        row["delay_change_last_stop_min"] = float(prev) - float(prev2)
+    if origin is not None:
+        row["origin_delay_min"] = float(origin)
+    row["max_delay_so_far_min"] = max(known)
+    row["avg_delay_so_far_min"] = float(np.mean(known))
     return row
 
 
 def status_of(d):
     if d <= -1:
-        return "Running early", SIGNAL_GREEN
+        return "Running early", GREEN
     if d <= 5:
-        return "On time", SIGNAL_GREEN
+        return "On time", GREEN
     if d <= 15:
-        return "Minor delay", SIGNAL_AMBER
+        return "Minor delay", AMBER
     if d <= 60:
-        return "Delayed", SIGNAL_AMBER
+        return "Delayed", AMBER
     if d <= 180:
-        return "Heavily delayed", SIGNAL_RED
-    return "Severely delayed", SIGNAL_RED
+        return "Heavily delayed", RED
+    return "Severely delayed", RED
 
 
-def fmt_duration(m):
+def fmt_dur(m):
     m = int(round(m))
-    sign = "-" if m < 0 else ""
-    m = abs(m)
+    sign, m = ("-" if m < 0 else ""), abs(m)
     h, mm = divmod(m, 60)
     return f"{sign}{h} h {mm:02d} min" if h else f"{sign}{mm} min"
 
 
-def departure_board(delay, sched_dt, title):
+def board(delay, sched_dt, title):
     label, color = status_of(delay)
     eta = sched_dt + dt.timedelta(minutes=float(delay))
     sign = "+" if delay > 0 else ""
     st.markdown(
-        f"""
-<div class="board">
-  <div class="big">{sign}{delay:.0f}<small>min</small></div>
-  <div class="meta">
-    <div class="status"><span class="dot" style="background:{color}"></span>{label}</div>
-    <div class="line">{title}</div>
-    <div class="line">Scheduled {sched_dt:%d %b, %H:%M} &nbsp;|&nbsp; Expected {eta:%d %b, %H:%M} ({fmt_duration(delay)})</div>
-  </div>
-</div>
-""",
+        f"""<div class="board">
+<div class="big">{sign}{delay:.0f}<small>min</small></div>
+<div class="status"><span class="dot" style="background:{color}"></span>{label}</div>
+<div class="line">{title}</div>
+<div class="line">Scheduled {sched_dt:%d %b, %H:%M} &nbsp;|&nbsp; Expected {eta:%d %b, %H:%M}</div>
+</div>""",
         unsafe_allow_html=True,
     )
 
 
-def gauge(delay, mae):
+def gauge(delay):
     top = max(120, abs(delay) * 1.4)
-    fig = go.Figure(
-        go.Indicator(
-            mode="gauge+number",
-            value=float(delay),
-            number={"suffix": " min", "font": {"family": "Barlow Condensed", "size": 40}},
-            gauge={
-                "axis": {"range": [-30, top]},
-                "bar": {"color": NAVY, "thickness": 0.28},
-                "steps": [
-                    {"range": [-30, 5], "color": "#cfe8d9"},
-                    {"range": [5, 60], "color": "#fbe7b0"},
-                    {"range": [60, top], "color": "#f2c6c1"},
-                ],
-            },
-        )
-    )
-    fig.update_layout(height=250, margin=dict(l=20, r=20, t=30, b=0))
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number", value=float(delay),
+        number={"suffix": " min", "font": {"family": "Barlow Condensed", "size": 36}},
+        gauge={"axis": {"range": [-30, top]}, "bar": {"color": NAVY, "thickness": 0.3},
+               "steps": [{"range": [-30, 5], "color": "#cfe8d9"}, {"range": [5, 60], "color": "#fbe7b0"},
+                         {"range": [60, top], "color": "#f2c6c1"}]}))
+    fig.update_layout(height=210, margin=dict(l=20, r=20, t=20, b=0))
     return fig
 
 
-def season_default(d):
-    return d.month in (12, 1)
+# ---- pickers / route -------------------------------------------------------
+def train_label(no):
+    nm = REF_MAP.get(str(no), (None, None))[0]
+    return f"{no} - {nm}" if nm else str(no)
 
 
-# --------------------------------------------------------------------------
-# Sidebar
-# --------------------------------------------------------------------------
-with st.sidebar:
-    st.markdown("### Model")
-    st.caption(f"LightGBM | {len(FEATURES)} input features")
-    mae = st.number_input(
-        "Test MAE (minutes) from your notebook",
-        min_value=0.0,
-        value=0.0,
-        step=0.5,
-        help="Optional. If you enter your model's test MAE, predictions show a +/- band.",
-    )
-    ref_file = st.file_uploader("train_details.csv (optional)", type="csv",
-                                help="Fills train name and type automatically.")
-    REF = find_reference(ref_file)
-    st.divider()
-    st.markdown("**Two ways to use the model**")
-    st.caption(
-        "Before departure: leave live delays off. The model uses history only.\n\n"
-        "While running: switch live delays on and enter the delay at earlier stops."
-    )
-    with st.expander("Features the model expects"):
-        st.write(FEATURES)
-
-# --------------------------------------------------------------------------
-# Header
-# --------------------------------------------------------------------------
-st.markdown('<p class="hero-title">Train Delay Predictor</p>', unsafe_allow_html=True)
-st.markdown(
-    '<p class="hero-sub">Predict how late a train will be at any stop, forecast a whole journey, '
-    "and see what drives the delay.</p>",
-    unsafe_allow_html=True,
-)
-
-tab_pred, tab_journey, tab_what, tab_batch, tab_model = st.tabs(
-    ["Predict a stop", "Journey forecast", "What-if", "Batch (CSV)", "Model insights"]
-)
-
-
-# Shared pickers ------------------------------------------------------------
-def pick_train(key):
+def train_picker(key, default=None):
     if "train_number" in LEVELS:
-        tn = st.selectbox("Train number", LEVELS["train_number"], key=f"{key}_tn")
-    else:
-        tn = st.text_input("Train number", "12001", key=f"{key}_tn").zfill(5)
-
-    name_guess, type_guess = None, None
-    if REF is not None:
-        hit = REF[REF["train_no"] == str(tn)]
-        if len(hit):
-            name_guess = hit.iloc[0].get("train_name")
-            type_guess = hit.iloc[0].get("type_code")
-
-    if "train_name" in FEATURES:
-        if "train_name" in LEVELS:
-            opts = LEVELS["train_name"]
-            idx = opts.index(name_guess) if name_guess in opts else 0
-            tname = st.selectbox("Train name", opts, index=idx, key=f"{key}_nm")
-        else:
-            tname = st.text_input("Train name", name_guess or "", key=f"{key}_nm")
-    else:
-        tname = name_guess
-    if "train_type" in FEATURES:
-        if "train_type" in LEVELS:
-            opts = LEVELS["train_type"]
-            idx = opts.index(str(type_guess)) if str(type_guess) in opts else 0
-            ttype = st.selectbox("Train type", opts, index=idx, key=f"{key}_ty")
-        else:
-            ttype = st.text_input("Train type", str(type_guess or ""), key=f"{key}_ty")
-    else:
-        ttype = type_guess
-    return tn, tname, ttype
+        opts = LEVELS["train_number"]
+        idx = opts.index(default) if default in opts else 0
+        return st.selectbox("Train", opts, index=idx, format_func=train_label, key=key,
+                            help="Type to search by number or name.")
+    return st.text_input("Train number", default or "12001", key=key).strip().zfill(5)
 
 
-def pick_station(key, label="Station code"):
-    if "station_code" in LEVELS:
-        return st.selectbox(label, LEVELS["station_code"], key=key)
-    return st.text_input(label, "NDLS", key=key).upper()
+def get_route(tn):
+    if SCHED is None:
+        return None
+    r = SCHED[SCHED["train_no"] == str(tn)]
+    if r.empty:
+        return None
+    return r.sort_values("station_no").reset_index(drop=True)
 
 
-# --------------------------------------------------------------------------
-# TAB 1 - single stop
-# --------------------------------------------------------------------------
-with tab_pred:
-    left, right = st.columns([1, 1.15], gap="large")
+def parse_time(s):
+    try:
+        return dt.datetime.strptime(str(s)[:5], "%H:%M").time()
+    except Exception:
+        return dt.time(9, 0)
+
+
+def train_meta(tn):
+    nm, ty = REF_MAP.get(str(tn), (None, None))
+    return nm, (str(ty) if ty is not None and not pd.isna(ty) else None)
+
+
+def sched_datetime(date, sched_time, day):
+    day = 1 if (day is None or pd.isna(day)) else int(day)
+    return dt.datetime.combine(date, sched_time) + dt.timedelta(days=max(day - 1, 0))
+
+
+# ==========================================================================
+# PAGE 1 - Predict
+# ==========================================================================
+def page_predict():
+    hero("Predict a delay", "Pick a train and a stop. Say whether it is already running. The rest is automatic.")
+    prev_trip = st.session_state.get("trip", {})
+    left, right = st.columns([1.05, 1], gap="large")
 
     with left:
-        st.subheader("Trip details")
-        c1, c2 = st.columns(2)
-        with c1:
-            tn, tname, ttype = pick_train("p")
-        with c2:
-            station = pick_station("p_station")
-            run_date = st.date_input("Run date", dt.date.today(), key="p_date")
-            sched_time = st.time_input("Scheduled arrival", dt.time(9, 0), key="p_time")
+        step("1. Train and stop")
+        tn = train_picker("pf_train", prev_trip.get("train_number"))
+        route = get_route(tn)
+        c1, c2 = st.columns([1, 1.3])
+        run_date = c1.date_input("Travel date", dt.date.today(), key="pf_date")
 
-        c3, c4, c5 = st.columns(3)
-        total_stops = c3.number_input("Stops in route", 2, 200, 30, key="p_total")
-        stop_index = c4.number_input("This is stop # (0 = origin)", 0, int(total_stops) - 1,
-                                     min(10, int(total_stops) - 1), key="p_idx")
-        dist = c5.number_input("Distance from origin (km)", 0.0, 4000.0, 450.0, step=10.0, key="p_dist")
-
-        c6, c7 = st.columns(2)
-        avg7 = c6.number_input("Train's avg delay, last 7 runs (min)", -60.0, 600.0, 20.0, step=1.0, key="p_avg7")
-        fog = c7.toggle("Fog season (Dec - Jan)", value=season_default(run_date), key="p_fog")
-
-        st.subheader("Live delays")
-        live = st.toggle("The train is running - I know its earlier delays", value=True, key="p_live")
-        prev = prev2 = origin = np.nan
-        if live:
-            l1, l2, l3 = st.columns(3)
-            prev = l1.number_input("Delay at previous stop (min)", -60.0, 1440.0, 25.0, key="p_prev")
-            prev2 = l2.number_input("Delay 2 stops back (min)", -60.0, 1440.0, 20.0, key="p_prev2")
-            origin = l3.number_input("Delay at origin (min)", -60.0, 1440.0, 10.0, key="p_origin")
-            if stop_index == 0:
-                st.warning("Stop 0 is the origin, so there are no earlier delays. Live inputs are ignored.")
+        if route is not None:
+            def lab(i):
+                r = route.iloc[i]
+                dist = r.distance_from_origin
+                return f"{i + 1}. {r.station_name}" + (f" ({dist:.0f} km)" if pd.notna(dist) else "")
+            stop_index = c2.selectbox("Stop", range(len(route)), index=len(route) // 2,
+                                      format_func=lab, key=f"pf_stop_{tn}")
+            r = route.iloc[stop_index]
+            station, total = r.station_name, len(route)
+            dist = float(r.distance_from_origin) if pd.notna(r.distance_from_origin) else 0.0
+            sched_time = parse_time(r.arrival_time)
+            day = r.arrival_day
+            st.caption(f"Scheduled arrival {sched_time:%H:%M}. This stop is {stop_index + 1} of {total}.")
         else:
-            st.markdown('<div class="note">Pre-departure mode: only schedule, season and history are used.</div>',
-                        unsafe_allow_html=True)
+            if "station_code" in LEVELS:
+                station = c2.selectbox("Station", LEVELS["station_code"], key="pf_station")
+            else:
+                station = c2.text_input("Station code", "NDLS", key="pf_station").upper()
+            st.caption("No schedule file loaded, so please fill in the route details.")
+            d1, d2, d3 = st.columns(3)
+            total = int(d1.number_input("Stops on route", 2, 200, 30, key="pf_total"))
+            stop_index = int(d2.number_input("Stop number (0 = start)", 0, total - 1, min(10, total - 1), key="pf_idx"))
+            dist = float(d3.number_input("Km from start", 0.0, 4000.0, 450.0, step=10.0, key="pf_dist"))
+            sched_time = st.time_input("Scheduled arrival", dt.time(9, 0), key="pf_time")
+            day = 1
 
-    ctx = dict(train_number=tn, train_name=tname, train_type=ttype, station_code=station,
-               stop_index=int(stop_index), total_stops=int(total_stops), distance_km=dist,
-               sched_hour=sched_time.hour, date=run_date, fog=fog, avg7=avg7)
+        step("2. Is the train already running?")
+        running = st.radio("Status", ["Not started yet", "Already running"], horizontal=True,
+                           label_visibility="collapsed", key="pf_status") == "Already running"
+        prev = prev2 = origin = None
+        if running and stop_index == 0:
+            st.info("This is the first stop, so there are no earlier delays to use.")
+        elif running:
+            prev = st.slider("Delay at the last stop it passed (minutes)", -30, 600, 15, key="pf_prev",
+                             help="The single most useful number for the prediction.")
+        else:
+            st.markdown('<div class="note">Using schedule, date and the train\'s history only. '
+                        "Predictions are rougher before the train starts.</div>", unsafe_allow_html=True)
 
-    # Build a history list from the three live numbers the user gave us
-    if live and stop_index > 0:
-        known = [origin, prev2, prev] if stop_index >= 2 else [prev]
-        hist = [float(x) for x in known if not np.isnan(x)]
-        row = build_row(ctx, hist)
-        # With only 3 delays we can't know the exact running stats - use what we have
-        row["previous_station_delay_min"] = prev
-        row["delay_2_stops_back_min"] = prev2 if stop_index >= 2 else np.nan
-        row["delay_change_last_stop_min"] = prev - prev2 if stop_index >= 2 else np.nan
-        row["origin_delay_min"] = origin
-        row["max_delay_so_far_min"] = max(x for x in [origin, prev2, prev] if not np.isnan(x))
-        row["avg_delay_so_far_min"] = float(np.nanmean([origin, prev2, prev]))
-    else:
-        row = build_row(ctx, [])
+        with st.expander("Fine-tune (optional)"):
+            avg7 = st.slider("Train's usual delay over its last 7 runs (minutes)", -10, 240, 15, key="pf_avg7")
+            if running and stop_index >= 1:
+                o1, o2 = st.columns(2)
+                origin = o1.number_input("Delay at start station", value=None, placeholder="unknown", key="pf_origin")
+                if stop_index >= 2:
+                    prev2 = o2.number_input("Delay 2 stops back", value=None, placeholder="unknown", key="pf_prev2")
 
+    nm, ty = train_meta(tn)
+    ctx = dict(train_number=tn, train_name=nm, train_type=ty, station_code=station,
+               stop_index=int(stop_index), total_stops=int(total), distance_km=dist,
+               sched_hour=sched_time.hour, journey_day=1 if pd.isna(day) else int(day),
+               date=run_date, avg7=float(avg7))
+    row = live_row(ctx, prev, prev2, origin) if prev is not None else build_row(ctx, [])
     pred = float(predict_rows([row])[0])
-    sched_dt = dt.datetime.combine(run_date, sched_time)
+    sched_dt = sched_datetime(run_date, sched_time, day)
+
+    st.session_state["trip"] = dict(train_number=tn, ctx=ctx, row=row, pred=pred, sched_dt=sched_dt,
+                                    running=prev is not None)
 
     with right:
-        st.subheader("Prediction")
-        departure_board(pred, sched_dt, f"Train {tn} at {station}")
-        show_plot(gauge(pred, mae))
-        if mae > 0:
-            st.caption(f"Typical error of this model is about +/- {mae:.1f} min, so the likely range is "
-                       f"{pred - mae:.0f} to {pred + mae:.0f} min.")
+        step("3. Prediction")
+        board(pred, sched_dt, f"{train_label(tn)} at {station}")
+        show_plot(gauge(pred))
         m1, m2, m3 = st.columns(3)
-        m1.metric("Predicted delay", fmt_duration(pred))
-        m2.metric("Route progress", f"{row['route_progress_ratio'] * 100:.0f}%")
-        m3.metric("Stops remaining", int(row["stops_remaining"]))
-        with st.expander("Exact values sent to the model"):
-            show_df(to_frame([row]).T.rename(columns={0: "value"}).astype(str))
+        m1.metric("Delay", fmt_dur(pred))
+        m2.metric("Route done", f"{row['route_progress_ratio'] * 100:.0f}%")
+        m3.metric("Stops left", int(row["stops_remaining"]))
+        if st.button("Save to history"):
+            st.session_state.setdefault("history", []).append(
+                {"Train": train_label(tn), "Stop": station, "Date": str(run_date),
+                 "Mode": "Live" if prev is not None else "Pre-departure", "Predicted delay (min)": round(pred, 1)})
+            st.toast("Saved")
+        hist = st.session_state.get("history", [])
+        if hist:
+            with st.expander(f"Saved predictions ({len(hist)})"):
+                show_df(pd.DataFrame(hist))
 
-# --------------------------------------------------------------------------
-# TAB 2 - journey forecast
-# --------------------------------------------------------------------------
-with tab_journey:
-    st.subheader("Forecast the rest of a journey")
-    st.caption("Fill in the delays you have already seen. Leave a delay empty and the model forecasts it, "
-               "using its own earlier forecasts as live data.")
 
-    a, b = st.columns([1, 1], gap="large")
-    with a:
-        jtn, jname, jtype = pick_train("j")
-    with b:
-        jdate = st.date_input("Run date", dt.date.today(), key="j_date")
-        javg7 = st.number_input("Train's avg delay, last 7 runs (min)", -60.0, 600.0, 20.0, key="j_avg7")
-        jfog = st.toggle("Fog season (Dec - Jan)", value=season_default(jdate), key="j_fog")
-        n = st.slider("Stops in route", 4, 40, 12, key="j_n")
+# ==========================================================================
+# PAGE 2 - Journey forecast
+# ==========================================================================
+def page_journey():
+    hero("Journey forecast", "Type the delays you have seen so far. The model forecasts the rest of the route.")
+    trip = st.session_state.get("trip", {})
+    c1, c2 = st.columns(2)
+    with c1:
+        tn = train_picker("jf_train", trip.get("train_number"))
+    run_date = c2.date_input("Travel date", trip.get("ctx", {}).get("date", dt.date.today()), key="jf_date")
 
-    first_station = LEVELS["station_code"][0] if "station_code" in LEVELS else "NDLS"
-    seed = pd.DataFrame(
-        {
-            "station_code": [first_station] * n,
-            "distance_km": np.linspace(0, 800, n).round(0),
-            "sched_hour": [int((6 + i * 1.2) % 24) for i in range(n)],
-            "delay_min": [5.0, 12.0, 20.0] + [None] * (n - 3),
-        }
-    )
-    colcfg = {
-        "station_code": (
-            st.column_config.SelectboxColumn("Station", options=LEVELS["station_code"])
-            if "station_code" in LEVELS
-            else st.column_config.TextColumn("Station")
-        ),
-        "distance_km": st.column_config.NumberColumn("Distance (km)", min_value=0),
-        "sched_hour": st.column_config.NumberColumn("Scheduled hour", min_value=0, max_value=23, step=1),
-        "delay_min": st.column_config.NumberColumn("Observed delay (min)", help="Leave empty to forecast"),
-    }
-    edited = show_editor(seed, column_config=colcfg, hide_index=True, key=f"j_table_{n}")
-
-    if st.button("Forecast journey", type="primary"):
-        hist, rows_out = [], []
-        for i, r in edited.reset_index(drop=True).iterrows():
-            c = dict(train_number=jtn, train_name=jname, train_type=jtype,
-                     station_code=r["station_code"], stop_index=i, total_stops=n,
-                     distance_km=float(r["distance_km"]), sched_hour=int(r["sched_hour"]),
-                     date=jdate, fog=jfog, avg7=javg7)
-            if pd.notna(r["delay_min"]):
-                d, kind = float(r["delay_min"]), "Observed"
-            else:
-                d, kind = float(predict_rows([build_row(c, hist)])[0]), "Forecast"
-            hist.append(d)
-            rows_out.append({"stop": i, "station": r["station_code"], "distance_km": r["distance_km"],
-                             "delay_min": round(d, 1), "type": kind})
-        res = pd.DataFrame(rows_out)
-        st.session_state["journey_result"] = res
-
-    res = st.session_state.get("journey_result")
-    if res is not None and len(res):
-        fig = go.Figure()
-        obs = res[res["type"] == "Observed"]
-        fc = res[res["type"] == "Forecast"]
-        fig.add_trace(go.Scatter(x=obs["stop"], y=obs["delay_min"], mode="lines+markers",
-                                 name="Observed", line=dict(color=NAVY, width=3)))
-        if len(fc):
-            join = pd.concat([obs.tail(1), fc]) if len(obs) else fc
-            fig.add_trace(go.Scatter(x=join["stop"], y=join["delay_min"], mode="lines+markers",
-                                     name="Forecast", line=dict(color=SIGNAL_AMBER, width=3, dash="dash")))
-        fig.add_hline(y=0, line_color="#999", line_width=1)
-        fig.update_layout(height=360, xaxis_title="Stop number", yaxis_title="Delay (min)",
-                          margin=dict(l=10, r=10, t=20, b=10), legend=dict(orientation="h", y=1.1))
-        show_plot(fig)
-        last = res.iloc[-1]
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Delay at final stop", fmt_duration(last["delay_min"]))
-        k2.metric("Worst delay on route", fmt_duration(res["delay_min"].max()))
-        k3.metric("Forecast stops", int((res["type"] == "Forecast").sum()))
-        show_df(res)
-        st.download_button("Download forecast (CSV)", res.to_csv(index=False).encode(),
-                           "journey_forecast.csv", "text/csv")
-
-# --------------------------------------------------------------------------
-# TAB 3 - what-if
-# --------------------------------------------------------------------------
-with tab_what:
-    st.subheader("What if the delay at the previous stop was different?")
-    st.caption("Uses the trip from the first tab. Only the delay at the previous stop changes.")
-    if stop_index == 0:
-        st.info("Pick a stop after the origin in the first tab to run this.")
+    txt = st.text_input("Delays so far, in minutes, one per stop in order", "5, 12, 20", key="jf_txt",
+                        help="Example: 0, 8, 15, 22 means 0 min at stop 1, 8 min at stop 2, and so on.")
+    nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", txt)]
+    route = get_route(tn)
+    if route is not None:
+        n = len(route)
     else:
-        xs = np.arange(-10, 301, 5)
-        rows = []
-        for x in xs:
-            r = dict(row)
-            r["previous_station_delay_min"] = float(x)
-            if not np.isnan(r["delay_2_stops_back_min"]):
-                r["delay_change_last_stop_min"] = float(x) - r["delay_2_stops_back_min"]
-            vals = [v for v in [r["origin_delay_min"], r["delay_2_stops_back_min"], float(x)]
-                    if not np.isnan(v)]
-            r["max_delay_so_far_min"] = max(vals)
-            r["avg_delay_so_far_min"] = float(np.mean(vals))
-            rows.append(r)
-        ys = predict_rows(rows)
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=NAVY, width=3), name="Predicted"))
-        fig.add_trace(go.Scatter(x=xs, y=xs, mode="lines", line=dict(color="#999", dash="dot"),
-                                 name="Same as previous stop"))
-        fig.update_layout(height=380, xaxis_title="Delay at previous stop (min)",
-                          yaxis_title="Predicted delay here (min)", margin=dict(l=10, r=10, t=20, b=10),
-                          legend=dict(orientation="h", y=1.1))
-        show_plot(fig)
-        st.markdown(
-            '<div class="note">If the blue line sits below the dotted line, the model expects the train to '
-            "recover some time. Above the dotted line means it expects the delay to grow.</div>",
-            unsafe_allow_html=True,
-        )
+        n = st.slider("Stops on route", max(len(nums) + 1, 4), 60, max(len(nums) + 6, 12), key="jf_n")
+        st.caption("No schedule file loaded: using evenly spaced stops.")
 
-        st.subheader("Fog season vs. normal season")
-        r_fog, r_ok = dict(row), dict(row)
-        r_fog["is_fog_season"], r_ok["is_fog_season"] = 1, 0
-        p_fog, p_ok = predict_rows([r_fog, r_ok])
-        f1, f2, f3 = st.columns(3)
-        f1.metric("Fog season", fmt_duration(p_fog))
-        f2.metric("Normal season", fmt_duration(p_ok))
-        f3.metric("Difference", fmt_duration(p_fog - p_ok))
+    with st.expander("Fine-tune (optional)"):
+        avg7 = st.slider("Train's usual delay over its last 7 runs (minutes)", -10, 240, 15, key="jf_avg7")
 
-# --------------------------------------------------------------------------
-# TAB 4 - batch
-# --------------------------------------------------------------------------
-with tab_batch:
-    st.subheader("Predict many rows from a CSV")
-    st.caption("Upload a file with the same column names the model was trained on. "
-               "Missing columns are treated as unknown. If the file contains delay_minutes, "
-               "accuracy is calculated too.")
-    tmpl = pd.DataFrame(columns=FEATURES)
-    st.download_button("Download empty template", tmpl.to_csv(index=False).encode(),
-                       "batch_template.csv", "text/csv")
-    up = st.file_uploader("CSV file", type="csv", key="batch_csv")
-    if up is not None:
-        raw = pd.read_csv(up, dtype={"train_number": str})
-        if "train_number" in raw.columns:
-            raw["train_number"] = raw["train_number"].astype(str).str.zfill(5)
-        missing = [c for c in FEATURES if c not in raw.columns]
-        if missing:
-            st.warning(f"{len(missing)} model columns are missing and will be treated as unknown: "
-                       + ", ".join(missing[:12]) + (" ..." if len(missing) > 12 else ""))
-        out = raw.copy()
-        out["predicted_delay_min"] = predict_rows(raw.to_dict("records")).round(2)
-        show_df(out.head(500))
-        st.download_button("Download predictions", out.to_csv(index=False).encode(),
-                           "predictions.csv", "text/csv")
-        if "delay_minutes" in out.columns:
-            err = (out["delay_minutes"] - out["predicted_delay_min"]).abs()
-            q1, q2, q3, q4 = st.columns(4)
-            q1.metric("MAE", f"{err.mean():.2f} min")
-            q2.metric("Median error", f"{err.median():.2f} min")
-            q3.metric("Within 10 min", f"{(err <= 10).mean() * 100:.1f}%")
-            q4.metric("Rows", f"{len(out):,}")
-            samp = out.sample(min(5000, len(out)), random_state=1)
-            fig = px.scatter(samp, x="delay_minutes", y="predicted_delay_min", opacity=0.35,
-                             labels={"delay_minutes": "Actual (min)", "predicted_delay_min": "Predicted (min)"})
-            lim = [float(samp["delay_minutes"].min()), float(samp["delay_minutes"].max())]
-            fig.add_trace(go.Scatter(x=lim, y=lim, mode="lines", line=dict(color=SIGNAL_RED, dash="dash"),
-                                     name="Perfect"))
-            fig.update_layout(height=380, margin=dict(l=10, r=10, t=20, b=10))
+    if not nums:
+        st.info("Enter at least one delay to start.")
+        return
+    if len(nums) >= n:
+        st.warning(f"This route has {n} stops, so only the first {n} delays are used.")
+        nums = nums[:n]
+
+    nm, ty = train_meta(tn)
+    hist, out = [], []
+    for i in range(n):
+        if route is not None:
+            r = route.iloc[i]
+            station = r.station_name
+            dist = float(r.distance_from_origin) if pd.notna(r.distance_from_origin) else 0.0
+            hour = parse_time(r.arrival_time).hour
+            day = 1 if pd.isna(r.arrival_day) else int(r.arrival_day)
+        else:
+            station, dist, hour, day = None, float(np.linspace(0, 800, n)[i]), int((6 + i * 1.2) % 24), 1
+        ctx = dict(train_number=tn, train_name=nm, train_type=ty, station_code=station, stop_index=i,
+                   total_stops=n, distance_km=dist, sched_hour=hour, journey_day=day,
+                   date=run_date, avg7=float(avg7))
+        if i < len(nums):
+            d, kind = nums[i], "Seen"
+        else:
+            d, kind = float(predict_rows([build_row(ctx, hist)])[0]), "Forecast"
+        hist.append(d)
+        out.append({"Stop": i + 1, "Station": station or f"Stop {i + 1}", "Delay (min)": round(d, 1), "Type": kind})
+    res = pd.DataFrame(out)
+
+    seen, fc = res[res["Type"] == "Seen"], res[res["Type"] == "Forecast"]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=seen["Station"], y=seen["Delay (min)"], mode="lines+markers", name="Seen",
+                             line=dict(color=NAVY, width=3)))
+    if len(fc):
+        join = pd.concat([seen.tail(1), fc])
+        fig.add_trace(go.Scatter(x=join["Station"], y=join["Delay (min)"], mode="lines+markers", name="Forecast",
+                                 line=dict(color=AMBER, width=3, dash="dash")))
+    fig.add_hline(y=0, line_color="#999", line_width=1)
+    fig.update_layout(height=360, yaxis_title="Delay (min)", margin=dict(l=10, r=10, t=10, b=10),
+                      legend=dict(orientation="h", y=1.12), xaxis=dict(type="category"))
+    show_plot(fig)
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("At final stop", fmt_dur(res.iloc[-1]["Delay (min)"]))
+    k2.metric("Worst on route", fmt_dur(res["Delay (min)"].max()))
+    k3.metric("Stops forecast", len(fc))
+    with st.expander("See the table"):
+        show_df(res)
+        st.download_button("Download CSV", res.to_csv(index=False).encode(), "journey_forecast.csv", "text/csv")
+
+
+# ==========================================================================
+# PAGE 3 - What-if
+# ==========================================================================
+def page_whatif():
+    hero("What if...", "Change one thing about your last prediction and see what the model does.")
+    trip = st.session_state.get("trip")
+    if not trip:
+        st.info("Make a prediction first, then come back here.")
+        st.page_link(PG_PREDICT, label="Go to Predict a delay", icon="🎯")
+        return
+    ctx, base = trip["ctx"], trip["row"]
+    st.caption(f"Based on {train_label(trip['train_number'])} at {ctx['station_code']} on {ctx['date']:%d %b %Y}.")
+    if ctx["stop_index"] == 0:
+        st.info("The trip's stop is the first one, so there are no earlier delays to change. "
+                "Pick a later stop on the Predict page.")
+    else:
+        default = base["previous_station_delay_min"]
+        default = 15 if pd.isna(default) else int(round(default))
+        x = st.slider("Delay at the last stop it passed (minutes)", -30, 600, int(np.clip(default, -30, 600)))
+
+        def with_prev(v):
+            r = dict(base)
+            known = [t for t in (r["origin_delay_min"], r["delay_2_stops_back_min"]) if not pd.isna(t)] + [float(v)]
+            r["previous_station_delay_min"] = float(v)
+            if not pd.isna(r["delay_2_stops_back_min"]):
+                r["delay_change_last_stop_min"] = float(v) - r["delay_2_stops_back_min"]
+            if ctx["stop_index"] == 1:
+                r["origin_delay_min"] = float(v)
+            r["max_delay_so_far_min"] = max(known)
+            r["avg_delay_so_far_min"] = float(np.mean(known))
+            return r
+
+        xs = np.arange(-30, 601, 10)
+        ys = predict_rows([with_prev(v) for v in xs])
+        here = float(predict_rows([with_prev(x)])[0])
+        c1, c2 = st.columns([1.6, 1], gap="large")
+        with c1:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=NAVY, width=3), name="Predicted"))
+            fig.add_trace(go.Scatter(x=xs, y=xs, mode="lines", line=dict(color="#999", dash="dot"),
+                                     name="Same as last stop"))
+            fig.add_trace(go.Scatter(x=[x], y=[here], mode="markers", marker=dict(size=14, color=AMBER,
+                                     line=dict(color=NAVY, width=2)), name="Your value"))
+            fig.update_layout(height=360, xaxis_title="Delay at last stop (min)", yaxis_title="Predicted delay here (min)",
+                              margin=dict(l=10, r=10, t=10, b=10), legend=dict(orientation="h", y=1.12))
             show_plot(fig)
+        with c2:
+            board(here, trip["sched_dt"], "With your changed value")
+            st.caption("Below the dotted line: the model expects the train to recover time. "
+                       "Above it: the delay is expected to grow.")
 
-# --------------------------------------------------------------------------
-# TAB 5 - model insights
-# --------------------------------------------------------------------------
-with tab_model:
-    st.subheader("What the model relies on")
+    st.markdown("#### Which day of the week is best?")
+    day_rows = []
+    for d in range(7):
+        r = dict(base)
+        r["day_of_week"] = d
+        day_rows.append(r)
+    dp = predict_rows(day_rows)
+    names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    fig = px.bar(x=names, y=dp, labels={"x": "", "y": "Predicted delay (min)"})
+    fig.update_traces(marker_color=[AMBER if i == int(np.argmin(dp)) else NAVY for i in range(7)])
+    fig.update_layout(height=280, margin=dict(l=10, r=10, t=10, b=10))
+    show_plot(fig)
+    st.caption(f"Lowest predicted delay: {names[int(np.argmin(dp))]} (highlighted). "
+               "This isolates the weekday effect only.")
+
+    st.markdown("#### Fog season vs normal season")
+    rf, rn = dict(base), dict(base)
+    rf["is_fog_season"], rn["is_fog_season"] = 1, 0
+    pf, pn = predict_rows([rf, rn])
+    a, b, c = st.columns(3)
+    a.metric("Fog season", fmt_dur(pf))
+    b.metric("Normal season", fmt_dur(pn))
+    c.metric("Difference", fmt_dur(pf - pn))
+
+
+# ==========================================================================
+# PAGE 4 - Batch
+# ==========================================================================
+def page_batch():
+    hero("Batch predictions", "Upload a CSV, get a prediction for every row.")
+    st.download_button("Download an empty template", pd.DataFrame(columns=FEATURES).to_csv(index=False).encode(),
+                       "batch_template.csv", "text/csv")
+    up = st.file_uploader("Your CSV", type="csv", key="batch_csv")
+    st.caption("Columns must use the model's names. Missing columns count as unknown. "
+               "If the file has delay_minutes, accuracy is calculated too.")
+    if up is None:
+        return
+    raw = pd.read_csv(up, dtype={"train_number": str})
+    if "train_number" in raw.columns:
+        raw["train_number"] = raw["train_number"].astype(str).str.zfill(5)
+    missing = [c for c in FEATURES if c not in raw.columns]
+    if missing:
+        st.warning(f"{len(missing)} columns missing, treated as unknown: " + ", ".join(missing[:10])
+                   + (" ..." if len(missing) > 10 else ""))
+    out = raw.copy()
+    out["predicted_delay_min"] = predict_rows(raw.to_dict("records")).round(2)
+    show_df(out.head(500))
+    st.download_button("Download predictions", out.to_csv(index=False).encode(), "predictions.csv", "text/csv")
+    if "delay_minutes" in out.columns:
+        err = (out["delay_minutes"] - out["predicted_delay_min"]).abs()
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("MAE", f"{err.mean():.2f} min")
+        q2.metric("Median error", f"{err.median():.2f} min")
+        q3.metric("Within 10 min", f"{(err <= 10).mean() * 100:.1f}%")
+        q4.metric("Rows", f"{len(out):,}")
+        samp = out.sample(min(5000, len(out)), random_state=1)
+        fig = px.scatter(samp, x="delay_minutes", y="predicted_delay_min", opacity=0.35,
+                         labels={"delay_minutes": "Actual (min)", "predicted_delay_min": "Predicted (min)"})
+        lim = [float(samp["delay_minutes"].min()), float(samp["delay_minutes"].max())]
+        fig.add_trace(go.Scatter(x=lim, y=lim, mode="lines", line=dict(color=RED, dash="dash"), name="Perfect"))
+        fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10))
+        show_plot(fig)
+
+
+# ==========================================================================
+# PAGE 5 - Model insights
+# ==========================================================================
+def page_insights():
+    hero("How the model thinks", "What matters most, in plain language.")
     if IMPORTANCE is None:
         st.info("Feature importance is not available for this model object.")
     else:
-        top = IMPORTANCE.head(15).sort_values("gain")
-        top = top.assign(share=(top["gain"] / IMPORTANCE["gain"].sum() * 100).round(1))
-        fig = px.bar(top, x="share", y="feature", orientation="h",
-                     labels={"share": "Share of total gain (%)", "feature": ""},
-                     color_discrete_sequence=[NAVY])
-        fig.update_layout(height=480, margin=dict(l=10, r=10, t=20, b=10))
+        top = IMPORTANCE.head(12).sort_values("gain").copy()
+        top["share"] = (top["gain"] / IMPORTANCE["gain"].sum() * 100).round(1)
+        fig = px.bar(top, x="share", y="feature", orientation="h", color_discrete_sequence=[NAVY],
+                     labels={"share": "Share of total importance (%)", "feature": ""})
+        fig.update_layout(height=440, margin=dict(l=10, r=10, t=10, b=10))
         show_plot(fig)
-        st.caption("Gain shows how much each feature improved the model's splits. "
-                   "It describes the model, not cause and effect.")
-
-    st.subheader("Reading the results")
     st.markdown(
         """
-- **Live mode is far stronger than pre-departure mode.** Delay at the previous stop is the strongest signal, so a
-  train that is already late will almost always still be late at the next stop.
-- **Rare, very long delays are hard to predict.** The model sees few examples of 6+ hour delays, so it tends to
-  predict smaller values for them.
-- **Only trains and stations seen in training are supported.** Unknown codes become "unknown" for the model.
+**Reading this**
+- When a train is already late, the delay at its last stop is the strongest hint for the next one.
+- Before departure the model only has schedule and history, so predictions are less precise.
+- Very long delays (6+ hours) are rare in the training data, so the model tends to under-predict them.
+- Only trains and stations seen in training are supported.
 """
     )
+    with st.expander("All features the model uses"):
+        st.write(FEATURES)
+
+
+# --------------------------------------------------------------------------
+# Navigation
+# --------------------------------------------------------------------------
+PG_PREDICT = st.Page(page_predict, title="Predict a delay", icon="🎯", default=True)
+PG_JOURNEY = st.Page(page_journey, title="Journey forecast", icon="🗺️")
+PG_WHATIF = st.Page(page_whatif, title="What if...", icon="🔀")
+PG_BATCH = st.Page(page_batch, title="Batch predictions", icon="📄")
+PG_INSIGHTS = st.Page(page_insights, title="How the model thinks", icon="🧠")
+
+st.navigation([PG_PREDICT, PG_JOURNEY, PG_WHATIF, PG_BATCH, PG_INSIGHTS]).run()
